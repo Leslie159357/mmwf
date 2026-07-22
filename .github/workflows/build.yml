@@ -92,10 +92,11 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: mmwf-linux-amd64
-          path: build/
 
-      - name: Verify binary exists
-        run: ls -la build/
+      - name: Copy binary to root (bypass .dockerignore)
+        run: |
+          cp mmwf-linux-amd64 server
+          chmod +x server
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
