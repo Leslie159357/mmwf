@@ -55,32 +55,18 @@ jobs:
           MAIN_JS=$(grep -oP 'src="([^"]+\.js)"' "$DIST/index.html" | head -1 | sed 's/.*"\(.*\)".*/\1/')
           echo "Main JS: $MAIN_JS"
           if [ -f "$DIST$MAIN_JS" ]; then
-            echo "Parsing Vite chunk map..."
-            python3 > /tmp/chunks.txt 2>&1 << 'PYEOF'
-import re, sys
-with open('$DIST$MAIN_JS', 'r', encoding='utf-8', errors='ignore') as f:
-    content = f.read()
-m = re.search(r'm\.f=\[(.*?)\]', content)
-if m:
-    files = re.findall(r'"([^"]+\.js)"', m.group(1))
-    for f in files:
-        print(f)
-else:
-    sys.exit(1)
-PYEOF
-            if [ $? -eq 0 ] && [ -s /tmp/chunks.txt ]; then
-              total=$(wc -l < /tmp/chunks.txt)
-              echo "Found $total dynamically imported chunks"
-              while IFS= read -r jsfile; do
-                [ -z "$jsfile" ] && continue
-                dir=$(dirname "$jsfile")
-                mkdir -p "$DIST/$dir"
-                if [ ! -f "$DIST/$jsfile" ]; then
-                  echo "  DL chunk: $jsfile"
-                  curl -sL "$SITE/$jsfile" -o "$DIST/$jsfile"
-                fi
-              done < /tmp/chunks.txt
-            fi
+            grep -oP '"[a-zA-Z0-9_/.-]+\.js"' "$DIST$MAIN_JS" | sed 's/"//g' | sort -u > /tmp/chunks.txt
+            total=$(wc -l < /tmp/chunks.txt)
+            echo "Found $total JS file references"
+            while IFS= read -r jsfile; do
+              [ -z "$jsfile" ] && continue
+              dir=$(dirname "$jsfile")
+              mkdir -p "$DIST/$dir"
+              if [ ! -f "$DIST/$jsfile" ]; then
+                echo "  DL: $jsfile"
+                curl -sL "$SITE/$jsfile" -o "$DIST/$jsfile"
+              fi
+            done < /tmp/chunks.txt
           fi
           curl -sL "$SITE/images/favicon.ico" -o "$DIST/images/favicon.ico" 2>/dev/null || true
           touch "$DIST/images/.gitkeep"
@@ -126,7 +112,7 @@ PYEOF
         with:
           name: mmwf-linux-amd64
 
-      - name: Copy binary to root (bypass .dockerignore)
+      - name: Copy binary (bypass .dockerignore)
         run: |
           cp mmwf-linux-amd64 mmwf-cracked
           chmod +x mmwf-cracked
