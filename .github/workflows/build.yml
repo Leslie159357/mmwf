@@ -33,7 +33,7 @@ jobs:
 
       - name: Get missing files from original repo
         run: |
-          mkdir -p cmd/server subscribes internal/web/dist/assets internal/web/dist/images
+          mkdir -p cmd/server subscribes
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/cmd/server/main.go" -o cmd/server/main.go
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/cmd/server/cors.go" -o cmd/server/cors.go
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/subscribes/embed.go" -o subscribes/embed.go
@@ -41,39 +41,60 @@ jobs:
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/subscribes/.keep.yaml" -o subscribes/.keep.yaml
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/subscribes/README.md" -o subscribes/README.md
 
-      - name: Download full frontend SPA from miaomiaowux.com
+      - name: Extract frontend dist from official release binary
         run: |
-          SITE="https://miaomiaowux.com"
           DIST="internal/web/dist"
-          mkdir -p "$DIST/assets" "$DIST/images"
-          curl -sL "$SITE/" -o "$DIST/index.html"
-          for url in $(grep -oP '(?:src|href)="([^"]+\.(js|css))"' "$DIST/index.html" | sed 's/.*"\(.*\)".*/\1/'); do
-            echo "DL: $url"
-            mkdir -p "$DIST/$(dirname $url)"
-            curl -sL "$SITE$url" -o "$DIST/$url"
-          done
-          MAIN_JS=$(grep -oP 'src="([^"]+\.js)"' "$DIST/index.html" | head -1 | sed 's/.*"\(.*\)".*/\1/')
-          echo "Main JS: $MAIN_JS"
-          if [ -f "$DIST$MAIN_JS" ]; then
-            grep -oP '"[a-zA-Z0-9_/.-]+\.js"' "$DIST$MAIN_JS" | sed 's/"//g' | sort -u > /tmp/chunks.txt
-            total=$(wc -l < /tmp/chunks.txt)
-            echo "Found $total JS file references"
-            while IFS= read -r jsfile; do
-              [ -z "$jsfile" ] && continue
-              dir=$(dirname "$jsfile")
-              mkdir -p "$DIST/$dir"
-              if [ ! -f "$DIST/$jsfile" ]; then
-                echo "  DL: $jsfile"
-                curl -sL "$SITE/$jsfile" -o "$DIST/$jsfile"
-              fi
-            done < /tmp/chunks.txt
+          mkdir -p "$DIST"
+
+          # Step 1: Download official Linux binary (62MB with full frontend)
+          echo "Downloading official release binary..."
+          curl -sL "https://github.com/iluobei/miaomiaowuX/releases/download/v0.3.5/mmwx-linux-amd64" -o /tmp/mmwx-official
+          chmod +x /tmp/mmwx-official
+          echo "Official binary size: $(du -h /tmp/mmwx-official | cut -f1)"
+
+          # Step 2: Start the official binary in background (it will serve on 12889)
+          # It may fail license check but HTTP server might still start
+          echo "Starting official binary to extract frontend..."
+          mkdir -p /tmp/mmwx-data
+          cd /tmp
+          timeout 30 /tmp/mmwx-official --port 18999 --data-dir /tmp/mmwx-data &
+          OFFICIAL_PID=$!
+          sleep 5
+
+          # Step 3: Check if server started
+          if kill -0 $OFFICIAL_PID 2>/dev/null; then
+            echo "Server started with PID $OFFICIAL_PID, extracting frontend..."
+            
+            # Download the frontend SPA completely using wget spider mode
+            cd "$DIST"
+            wget -q -r -np -nH --cut-dirs=0 -P . http://127.0.0.1:18999/ 2>&1 || true
+            
+            # Also specifically download all assets
+            wget -q -r -np -nH --cut-dirs=0 -P . http://127.0.0.1:18999/assets/ 2>&1 || true
+            
+            kill $OFFICIAL_PID 2>/dev/null
+          else
+            echo "Server failed to start, using fallback method..."
           fi
-          curl -sL "$SITE/images/favicon.ico" -o "$DIST/images/favicon.ico" 2>/dev/null || true
-          touch "$DIST/images/.gitkeep"
-          echo "=== DIST SUMMARY ==="
-          find "$DIST" -type f | wc -l
-          du -sh "$DIST"
-          find "$DIST/assets" -name "*.js" | wc -l
+
+          # Step 4: Fallback - try docker extraction
+          if [ ! -f "$DIST/index.html" ] || [ ! -s "$DIST/index.html" ]; then
+            echo "Binary extraction failed, trying Docker..."
+            docker pull ghcr.io/iluobei/miaomiaowux:latest 2>/dev/null || docker pull ghcr.io/iluobei/miaomiaowuX:latest 2>/dev/null || true
+            if docker image ls | grep -q "miaomiaowu"; then
+              docker create --name mmwx-tmp $(docker image ls | grep miaomiaowu | head -1 | awk '{print $1":"$2}')
+              docker cp mmwx-tmp:/app/internal/web/dist/. "$DIST/" 2>/dev/null || docker cp mmwx-tmp:/app/dist/. "$DIST/" 2>/dev/null || true
+              docker rm mmwx-tmp
+            fi
+          fi
+
+          # Step 5: Verify
+          echo "=== DIST VERIFICATION ==="
+          cd /tmp
+          find "$DIST" -type f 2>/dev/null | head -20
+          echo "..."
+          echo "Total files: $(find "$DIST" -type f 2>/dev/null | wc -l)"
+          echo "Dist size: $(du -sh "$DIST" 2>/dev/null | cut -f1)"
 
       - name: Setup Go
         uses: actions/setup-go@v5
