@@ -1,4 +1,4 @@
-name: Build mmwf
+﻿name: Build mmwf
 
 on:
   workflow_dispatch:
@@ -60,38 +60,70 @@ jobs:
           OFFICIAL_PID=$!
           echo "PID: $OFFICIAL_PID"
 
-          sleep 6
+          sleep 8
 
           if kill -0 $OFFICIAL_PID 2>/dev/null; then
             echo "Server is running! Extracting frontend..."
 
+            # Download index.html
             curl -sL "http://127.0.0.1:18999/" -o /tmp/frontend/index.html
             echo "index.html: $(wc -c < /tmp/frontend/index.html) bytes"
+            head -5 /tmp/frontend/index.html
 
-            curl -sL "http://127.0.0.1:18999/images/favicon.ico" -o /tmp/frontend/images/favicon.ico 2>/dev/null
+            # Download favicon
+            curl -sL "http://127.0.0.1:18999/images/favicon.ico" -o /tmp/frontend/images/favicon.ico 2>/dev/null || true
 
+            # Download JS/CSS from index.html - skip external URLs (containing ://)
             for url in $(grep -oP '(?:src|href)="([^"]+\.(js|css))"' /tmp/frontend/index.html 2>/dev/null | sed 's/.*"\(.*\)".*/\1/'); do
-              dir=$(dirname "$url")
-              mkdir -p "/tmp/frontend/$dir"
-              echo "DL: $url"
-              curl -sL "http://127.0.0.1:18999/$url" -o "/tmp/frontend/$url"
+              case "$url" in
+                *"://"*) echo "SKIP external: $url" ;;
+                *)
+                  dir=$(dirname "$url")
+                  mkdir -p "/tmp/frontend/$dir"
+                  echo "DL: $url"
+                  curl -sL "http://127.0.0.1:18999/$url" -o "/tmp/frontend/$url"
+                  ;;
+              esac
             done
 
-            MAIN_JS=$(grep -oP 'src="([^"]+\.js)"' /tmp/frontend/index.html 2>/dev/null | head -1 | sed 's/.*"\(.*\)".*/\1/')
-            if [ -n "$MAIN_JS" ] && [ -f "/tmp/frontend/$MAIN_JS" ]; then
-              echo "Main JS: $MAIN_JS ($(wc -c < "/tmp/frontend/$MAIN_JS") bytes)"
-              for jsref in $(grep -oP '"[a-zA-Z0-9_-]+(/[a-zA-Z0-9._/-]+\.js)"' "/tmp/frontend/$MAIN_JS" 2>/dev/null | sed 's/"//g' | sort -u); do
-                dir=$(dirname "$jsref")
-                mkdir -p "/tmp/frontend/$dir"
-                if [ ! -f "/tmp/frontend/$jsref" ]; then
-                  echo "CHUNK: $jsref"
-                  curl -sL "http://127.0.0.1:18999/$jsref" -o "/tmp/frontend/$jsref"
-                fi
-              done
+            # Find the actual main JS (module script, NOT external URLs)
+            MAIN_JS=$(grep -oP 'type="module"[^>]*src="([^"]+\.js)"' /tmp/frontend/index.html 2>/dev/null | sed 's/.*src="\(.*\)".*/\1/')
+            if [ -z "$MAIN_JS" ]; then
+              # Fallback: first non-external JS
+              MAIN_JS=$(grep -oP 'src="([^"]+\.js)"' /tmp/frontend/index.html 2>/dev/null | sed 's/.*"\(.*\)".*/\1/' | grep -v '://' | head -1)
+            fi
+            if [ -z "$MAIN_JS" ]; then
+              MAIN_JS=$(grep -oP 'src="([^"]+)"' /tmp/frontend/index.html 2>/dev/null | sed 's/.*"\(.*\)".*/\1/' | grep '\.js$' | grep -v '://' | head -1)
             fi
 
-            kill $OFFICIAL_PID 2>/dev/null
-            wait $OFFICIAL_PID 2>/dev/null
+            if [ -n "$MAIN_JS" ]; then
+              # Strip leading slash for local path
+              MAIN_FILE="/tmp/frontend/${MAIN_JS#/}"
+              if [ -f "$MAIN_FILE" ]; then
+                echo "Main JS: $MAIN_JS ($(wc -c < "$MAIN_FILE") bytes)"
+                # Extract all .js references from main JS - skip external URLs
+                for jsref in $(grep -oP '"[a-zA-Z0-9._/-]+\.js"' "$MAIN_FILE" 2>/dev/null | sed 's/"//g' | sort -u); do
+                  case "$jsref" in
+                    *"://"*) echo "SKIP chunk: $jsref" ;;
+                    *)
+                      dir=$(dirname "$jsref")
+                      mkdir -p "/tmp/frontend/$dir"
+                      if [ ! -f "/tmp/frontend/$jsref" ]; then
+                        echo "CHUNK: $jsref"
+                        curl -sL "http://127.0.0.1:18999/$jsref" -o "/tmp/frontend/$jsref"
+                      fi
+                      ;;
+                  esac
+                done
+              else
+                echo "Main JS file not found at: $MAIN_FILE"
+              fi
+            else
+              echo "WARNING: No main JS found"
+            fi
+
+            kill $OFFICIAL_PID 2>/dev/null || true
+            wait $OFFICIAL_PID 2>/dev/null || true
           else
             echo "Server failed to start. Logs:"
             cat /tmp/mmwx-log.txt
@@ -101,10 +133,10 @@ jobs:
           cp -r /tmp/frontend/* "$DIST_ABS/" 2>/dev/null
 
           echo "=== DIST VERIFICATION ==="
-          ls -la "$DIST_ABS/" 2>/dev/null
-          echo "Total files: $(find "$DIST_ABS" -type f 2>/dev/null | wc -l)"
-          echo "JS files: $(find "$DIST_ABS" -name "*.js" 2>/dev/null | wc -l)"
-          echo "CSS files: $(find "$DIST_ABS" -name "*.css" 2>/dev/null | wc -l)"
+          find "$DIST_ABS" -type f 2>/dev/null
+          echo "Total files: $(find "$DIST_ABS" -type f 2>$null | wc -l)"
+          echo "JS files: $(find "$DIST_ABS" -name "*.js" 2>$null | wc -l)"
+          echo "CSS files: $(find "$DIST_ABS" -name "*.css" 2>$null | wc -l)"
 
       - name: Setup Go
         uses: actions/setup-go@v5
