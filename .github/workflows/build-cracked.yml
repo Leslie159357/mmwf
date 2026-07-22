@@ -40,36 +40,192 @@ jobs:
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/cmd/server/cors.go" -o cmd/server/cors.go
           echo "OK: cmd/server/main.go and cors.go downloaded"
 
-      - name: 从官方 Docker 镜像提取前端 dist
+      - name: 🌐 从官网下载前端 dist
         run: |
-          IMAGE="ghcr.io/iluobei/miaomiaowux:latest"
-          echo "登录 ghcr.io..."
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin 2>/dev/null || true
-          echo "拉取官方镜像: $IMAGE"
-          docker pull $IMAGE
-          if [ $? -ne 0 ]; then
-            echo "ghcr.io 拉取失败，尝试备用方式..."
-            LATEST=$(curl -sL https://api.github.com/repos/iluobei/miaomiaowuX/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)
-            echo "最新原版版本: $LATEST"
-            # 用原版 Release 的二进制文件提取前端
-            curl -sL "https://github.com/iluobei/miaomiaowuX/releases/download/${LATEST}/mmwx-linux-amd64" -o /tmp/mmwx-original
-            chmod +x /tmp/mmwx-original
-            mkdir -p internal/web/dist
-            echo "WARNING: 无法从 Docker 镜像提取前端 dist，改用替代方案"
-            echo "请手动将前端 dist 文件放入 internal/web/dist/ 后重试"
-            exit 1
+          SITE="https://miaomiaowux.com"
+          DIST_DIR="internal/web/dist"
+          ASSETS_DIR="$DIST_DIR/assets"
+          IMAGES_DIR="$DIST_DIR/images"
+          mkdir -p "$ASSETS_DIR" "$IMAGES_DIR"
+
+          # 下载 index.html
+          echo "下载 index.html..."
+          curl -sL "$SITE/" -o "$DIST_DIR/index.html"
+
+          # 从 index.html 提取 JS/CSS 资源并下载
+          echo "下载主 JS / CSS 资源..."
+          for url in $(grep -oP '(?:src|href)="([^"]+\.(js|css))"' "$DIST_DIR/index.html" | sed 's/.*"\(.*\)".*/\1/'); do
+            file="$DIST_DIR/$url"
+            mkdir -p "$(dirname "$file")"
+            echo "  下载: $url"
+            curl -sL "$SITE$url" -o "$file"
+          done
+
+          # 从 index.html 提取图片资源
+          for url in $(grep -oP 'content="([^"]+\.(png|ico|svg|webp))"' "$DIST_DIR/index.html" | sed 's/.*"\(.*\)".*/\1/'); do
+            file="$DIST_DIR/$url"
+            mkdir -p "$(dirname "$file")"
+            echo "  下载: $url"
+            curl -sL "$SITE$url" -o "$file"
+          done
+
+          # 下载 favicon
+          for url in $(grep -oP 'href="([^"]+\.(ico|png|svg))"' "$DIST_DIR/index.html" | sed 's/.*"\(.*\)".*/\1/'); do
+            file="$DIST_DIR/$url"
+            mkdir -p "$(dirname "$file")"
+            echo "  下载: $url"
+            curl -sL "$SITE$url" -o "$file"
+          done
+
+          # 从主 JS 中提取 __vite__mapDeps 列表并下载所有额外 JS 文件
+          MAIN_JS=$(grep -oP 'src="([^"]+\.js)"' "$DIST_DIR/index.html" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "主 JS: $MAIN_JS"
+
+          if [ -n "$MAIN_JS" ] && [ -f "$DIST_DIR/$MAIN_JS" ]; then
+            echo "从主 JS 提取依赖列表..."
+            # 提取 m.f=[...] 数组中的 JS 文件路径
+            grep -oP 'm\.f=\["[^"]*"'(?:(?:(?::'(?::'[^']*'')?)?!)?,'\''[^'']*'\'')*' "$DIST_DIR/$MAIN_JS" > /tmp/deps_raw.txt 2>/dev/null || true
+            # 更简单: 直接提取 m.f=["..."] 中双引号内的内容
+            python3 -c "
+import re, os
+with open('$DIST_DIR/$MAIN_JS', 'r', encoding='utf-8', errors='ignore') as f:
+    content = f.read()
+# Find m.f=[...] array
+match = re.search(r'm\.f=\[([^\]]+)\]', content)
+if match:
+    items = re.findall(r'\"([^\"]+\.js)\"', match.group(1))
+    for item in items:
+        print(item)
+" > /tmp/js_deps.txt 2>/dev/null || true
+
+            if [ -s /tmp/js_deps.txt ]; then
+              echo "发现 $(wc -l < /tmp/js_deps.txt) 个额外 JS 文件"
+              while IFS= read -r jsfile; do
+                [ -z "$jsfile" ] && continue
+                outfile="$DIST_DIR/$jsfile"
+                mkdir -p "$(dirname "$outfile")"
+                if [ ! -f "$outfile" ]; then
+                  echo "  下载: $jsfile"
+                  curl -sL "$SITE/$jsfile" -o "$outfile"
+                fi
+              done < /tmp/js_deps.txt
+            else
+              echo "未从主 JS 提取到依赖，尝试备用方法..."
+              # 备用: 硬编码已知依赖列表
+              cat > /tmp/js_fallback.txt << 'EOF'
+assets/index-Bf-l77s8.js
+assets/animated-x-DEgWPAwl.js
+assets/card-sGhZ2vH2.js
+assets/activity-BM8wfFiw.js
+assets/file-text-GpZ3wzAc.js
+assets/arrow-right-Deu8qpkr.js
+assets/index-BFEYvbH-.js
+assets/x-doc-layout-CHr59RWS.js
+assets/xray-system-config-CwUiz6ny.js
+assets/xray-service-DBWS-WfE.js
+assets/xray-routing-Dq4yJuyH.js
+assets/xray-outbounds-DMM5ORIk.js
+assets/xray-inbounds-CAPO1aZA.js
+assets/alert-CVH3e0lW.js
+assets/triangle-alert-DikwWLQC.js
+assets/users-DkYfQS-t.js
+assets/badge-CDQbeU0B.js
+assets/input-DDdJIDoh.js
+assets/label-Dj36WbEV.js
+assets/switch-DumBJIqJ.js
+assets/index-DGEohVIl.js
+assets/plus-T0p6bTg3.js
+assets/calendar-sGdE-65O.js
+assets/link-C88SzwPR.js
+assets/pen-line-Dg6rApSn.js
+assets/trash-2-CaQ06JsD.js
+assets/power-ENDRlFio.js
+assets/upgrade-from-mmw-mm9n3SUB.js
+assets/upload-CxckBqG5.js
+assets/circle-check-DXamFuZB.js
+assets/circle-Du_C_jfF.js
+assets/copy-CPBuU_gP.js
+assets/loader-circle-Dfq3IHr2.js
+assets/external-link-CF-ehqDP.js
+assets/update-Bh6bc7BV.js
+assets/screenshot-NfKr7NpR.js
+assets/tutorial-Cc13AuDW.js
+assets/step-indicator-BEj0_3SE.js
+assets/check-BLzAEVVH.js
+assets/info-CUfeq5ai.js
+assets/tool-mmwx-tgbot-D96uQPtf.js
+assets/tool-cloudflare-turnstile-C4OP1Mm7.js
+assets/templates-BBRazrHb.js
+assets/pencil-b94m5PNr.js
+assets/system-settings-B1zLxEuI.js
+assets/radio-group-CPiXOTWP.js
+assets/shield-alert-DLYZa4vA.js
+assets/rotate-ccw-BRkMbH0T.js
+assets/key-round-DuEm3Xcb.js
+assets/save-BksupcQa.js
+assets/system-requirements-DUn1oNti.js
+assets/subscribe-files-BLqtCQ8h.js
+assets/share-server-MhQiGtE9.js
+assets/wifi-BO09RTV5.js
+assets/routed-outbound-C7MVJVch.js
+assets/remote-servers-ahkMeMLW.js
+assets/quick-start-DUVFGbQg.js
+assets/protocol-vmess-OuJBHbz-.js
+assets/protocol-vless-D5VekMlx.js
+assets/protocol-trojan-xWhToDiV.js
+assets/protocol-snell-xLzWzACh.js
+assets/protocol-shadowsocks-DWQvNK9S.js
+assets/protocol-matrix-DPBO0ph_.js
+assets/protocol-hysteria2-Nbyfvpxg.js
+assets/protocol-anytls-BlcE71TI.js
+assets/packages-BzBtoXcA.js
+assets/arrow-left-right-Db5KYxxe.js
+assets/arrow-down-to-line-Dd9LBmqd.js
+assets/arrow-up-from-line-Cj290NDU.js
+assets/nodes-BlDvbCAp.js
+assets/node-speedtest-D09MkM69.js
+assets/node-ratelimit-D4PsN2Bl.js
+assets/mcp-CsUqq70Z.js
+assets/install-docker-B2Yxl6WU.js
+assets/install-direct-BQMb4JnT.js
+assets/install-agent-DT-FtKzd.js
+assets/generator-CuzXVEl_.js
+assets/features-CgZKlpuC.js
+assets/faq-sub-client-BcxXLf2U.js
+assets/faq-server-management-BANpECNW.js
+assets/faq-protocol-inbound-DVKHSVa0.js
+assets/faq-node-management-BZsSO2gX.js
+assets/faq-install-deploy-DCR7e42A.js
+assets/faq-common-ops-BJh5kyHz.js
+assets/faq-carpool-B0qxTduw.js
+assets/faq-C_BFHTcz.js
+assets/embedded-xray-Dq4Uq5cY.js
+assets/custom-rules-GPyTkhLS.js
+assets/comparison-DbAdQDnU.js
+assets/changelog-BwFbuHuQ.js
+assets/certificates-R_LQYulJ.js
+assets/about-DTXGsJ-f.js
+EOF
+              while IFS= read -r jsfile; do
+                [ -z "$jsfile" ] && continue
+                outfile="$DIST_DIR/$jsfile"
+                mkdir -p "$(dirname "$outfile")"
+                if [ ! -f "$outfile" ]; then
+                  echo "  下载: $jsfile"
+                  curl -sL "$SITE/$jsfile" -o "$outfile"
+                fi
+              done < /tmp/js_fallback.txt
+            fi
           fi
-          echo "从镜像中提取前端文件..."
-          docker create --name mmwx-tmp $IMAGE
-          docker cp mmwx-tmp:/app/internal/web/dist ./internal/web/dist
-          docker rm mmwx-tmp
-          if [ -d "internal/web/dist" ] && [ "$(ls -A internal/web/dist 2>$null)" ]; then
-            echo "OK: 前端 dist 提取成功"
-            ls -la internal/web/dist/
-          else
-            echo "FAIL: 前端 dist 提取失败"
-            exit 1
-          fi
+
+          # 验证下载结果
+          echo ""
+          echo "=== 下载统计 ==="
+          find "$DIST_DIR" -type f | wc -l | xargs echo "文件总数:"
+          du -sh "$DIST_DIR" | awk '{print "总大小:", $1}'
+          echo ""
+          echo "=== dist 目录结构 ==="
+          find "$DIST_DIR" -type f | sort
 
       - name: Setup Go
         uses: actions/setup-go@v5
