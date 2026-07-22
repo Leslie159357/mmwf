@@ -1,9 +1,8 @@
-# Dockerfile.cracked - mmwf cracked edition
 FROM alpine:latest
 
 RUN apk add --no-cache ca-certificates tzdata
 
-COPY build/mmwf-linux-amd64 /app/server
+COPY server /app/server
 COPY configs /app/configs
 COPY rule_templates /app/rule_templates
 COPY templates /app/templates
