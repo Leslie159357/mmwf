@@ -43,10 +43,10 @@ jobs:
 
       - name: Extract frontend dist from official release binary
         run: |
-          DIST="internal/web/dist"
-          mkdir -p "$DIST"
+          DIST_ABS="${GITHUB_WORKSPACE}/internal/web/dist"
+          mkdir -p "$DIST_ABS"
 
-          echo "Downloading official v0.3.5 Linux binary (62MB)..."
+          echo "Downloading official v0.3.5 Linux binary..."
           curl -sL "https://github.com/iluobei/miaomiaowuX/releases/download/v0.3.5/mmwx-linux-amd64" -o /tmp/mmwx-official
           chmod +x /tmp/mmwx-official
           echo "Size: $(du -h /tmp/mmwx-official | cut -f1)"
@@ -54,33 +54,62 @@ jobs:
           echo "Starting official binary on port 18999..."
           mkdir -p /tmp/mmwx-data /tmp/mmwx-data/logs
           cd /tmp/mmwx-data
-          PORT=18999 /tmp/mmwx-official &
+          PORT=18999 /tmp/mmwx-official > /tmp/mmwx-log.txt 2>&1 &
           OFFICIAL_PID=$!
           echo "PID: $OFFICIAL_PID"
 
-          sleep 6
+          sleep 8
 
           if kill -0 $OFFICIAL_PID 2>/dev/null; then
             echo "Server is running! Extracting frontend..."
-            cd /tmp
-            wget -q -r -np -nH --cut-dirs=0 -P frontend "http://127.0.0.1:18999/" 2>&1 || true
-            wget -q -r -np -nH --cut-dirs=0 -P frontend "http://127.0.0.1:18999/assets/" 2>&1 || true
-            wget -q -r -np -nH --cut-dirs=0 -P frontend "http://127.0.0.1:18999/images/" 2>&1 || true
+
+            # Download index.html
+            curl -sL "http://127.0.0.1:18999/" -o /tmp/frontend/index.html
+            echo "index.html: $(wc -c < /tmp/frontend/index.html) bytes"
+
+            # Parse index.html for JS/CSS assets
+            for url in $(grep -oP '(?:src|href)="([^"]+\.(js|css))"' /tmp/frontend/index.html | sed 's/.*"\(.*\)".*/\1/'); do
+              dir=$(dirname "$url")
+              mkdir -p "/tmp/frontend/$dir"
+              echo "DL: $url"
+              curl -sL "http://127.0.0.1:18999/$url" -o "/tmp/frontend/$url"
+            done
+
+            # Find all JS chunks via __vite__mapDeps or similar patterns
+            MAIN_JS=$(grep -oP 'src="([^"]+\.js)"' /tmp/frontend/index.html | head -1 | sed 's/.*"\(.*\)".*/\1/')
+            if [ -f "/tmp/frontend/$MAIN_JS" ]; then
+              echo "Main JS: $MAIN_JS"
+              # Extract all .js references
+              for jsref in $(grep -oP '"[a-zA-Z0-9_-]+(/[a-zA-Z0-9._/-]+\.js)"' "/tmp/frontend/$MAIN_JS" | sed 's/"//g' | sort -u); do
+                dir=$(dirname "$jsref")
+                mkdir -p "/tmp/frontend/$dir"
+                if [ ! -f "/tmp/frontend/$jsref" ]; then
+                  echo "CHUNK: $jsref"
+                  curl -sL "http://127.0.0.1:18999/$jsref" -o "/tmp/frontend/$jsref"
+                fi
+              done
+            fi
+
+            # Also download favicon
+            curl -sL "http://127.0.0.1:18999/images/favicon.ico" -o /tmp/frontend/images/favicon.ico 2>/dev/null || true
+
             kill $OFFICIAL_PID 2>/dev/null
             wait $OFFICIAL_PID 2>/dev/null
           else
-            echo "Server failed to start"
+            echo "Server failed to start. Logs:"
+            cat /tmp/mmwx-log.txt
           fi
 
           if [ -d "/tmp/frontend" ]; then
-            echo "Copying frontend files to $DIST..."
-            cp -r /tmp/frontend/* "$DIST/" 2>/dev/null || true
+            echo "Copying frontend files to $DIST_ABS..."
+            cp -r /tmp/frontend/* "$DIST_ABS/" 2>/dev/null || true
           fi
 
           echo "=== DIST VERIFICATION ==="
-          ls -la "$DIST/" 2>/dev/null || echo "DIST directory empty or missing"
-          find "$DIST" -type f 2>/dev/null | wc -l
-          find "$DIST" -name "*.js" 2>/dev/null | wc -l
+          ls -la "$DIST_ABS/" 2>/dev/null || echo "DIST directory empty or missing"
+          echo "Total files: $(find "$DIST_ABS" -type f 2>$null | wc -l)"
+          echo "JS files: $(find "$DIST_ABS" -name "*.js" 2>$null | wc -l)"
+          echo "CSS files: $(find "$DIST_ABS" -name "*.css" 2>$null | wc -l)"
 
       - name: Setup Go
         uses: actions/setup-go@v5
