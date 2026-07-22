@@ -1,4 +1,4 @@
-name: Build mmwf
+﻿name: Build mmwf
 
 on:
   workflow_dispatch:
@@ -41,20 +41,53 @@ jobs:
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/subscribes/.keep.yaml" -o subscribes/.keep.yaml
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/subscribes/README.md" -o subscribes/README.md
 
-      - name: Download frontend from miaomiaowux.com
+      - name: Download full frontend SPA from miaomiaowux.com
         run: |
           SITE="https://miaomiaowux.com"
           DIST="internal/web/dist"
           mkdir -p "$DIST/assets" "$DIST/images"
           curl -sL "$SITE/" -o "$DIST/index.html"
           for url in $(grep -oP '(?:src|href)="([^"]+\.(js|css))"' "$DIST/index.html" | sed 's/.*"\(.*\)".*/\1/'); do
-            echo "DL asset: $url"
+            echo "DL: $url"
             mkdir -p "$DIST/$(dirname $url)"
             curl -sL "$SITE$url" -o "$DIST/$url"
           done
-          curl -sL "$SITE/images/favicon.ico" -o "$DIST/images/favicon.ico"
+          MAIN_JS=$(grep -oP 'src="([^"]+\.js)"' "$DIST/index.html" | head -1 | sed 's/.*"\(.*\)".*/\1/')
+          echo "Main JS: $MAIN_JS"
+          if [ -f "$DIST$MAIN_JS" ]; then
+            echo "Parsing Vite chunk map..."
+            python3 > /tmp/chunks.txt 2>&1 << 'PYEOF'
+import re, sys
+with open('$DIST$MAIN_JS', 'r', encoding='utf-8', errors='ignore') as f:
+    content = f.read()
+m = re.search(r'm\.f=\[(.*?)\]', content)
+if m:
+    files = re.findall(r'"([^"]+\.js)"', m.group(1))
+    for f in files:
+        print(f)
+else:
+    sys.exit(1)
+PYEOF
+            if [ $? -eq 0 ] && [ -s /tmp/chunks.txt ]; then
+              total=$(wc -l < /tmp/chunks.txt)
+              echo "Found $total dynamically imported chunks"
+              while IFS= read -r jsfile; do
+                [ -z "$jsfile" ] && continue
+                dir=$(dirname "$jsfile")
+                mkdir -p "$DIST/$dir"
+                if [ ! -f "$DIST/$jsfile" ]; then
+                  echo "  DL chunk: $jsfile"
+                  curl -sL "$SITE/$jsfile" -o "$DIST/$jsfile"
+                fi
+              done < /tmp/chunks.txt
+            fi
+          fi
+          curl -sL "$SITE/images/favicon.ico" -o "$DIST/images/favicon.ico" 2>/dev/null || true
           touch "$DIST/images/.gitkeep"
-          echo "Dist files: $(find $DIST -type f | wc -l)"
+          echo "=== DIST SUMMARY ==="
+          find "$DIST" -type f | wc -l
+          du -sh "$DIST"
+          find "$DIST/assets" -name "*.js" | wc -l
 
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -95,10 +128,8 @@ jobs:
 
       - name: Copy binary to root (bypass .dockerignore)
         run: |
-          ls -la
           cp mmwf-linux-amd64 mmwf-cracked
           chmod +x mmwf-cracked
-          ls -la mmwf-cracked
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
