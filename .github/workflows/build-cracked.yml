@@ -2,11 +2,6 @@ name: 🏗️ 自动构建 mmwf 破解版
 
 on:
   workflow_dispatch:
-    inputs:
-      version:
-        description: 原版版本号（留空自动获取最新）
-        required: false
-        default: ''
   push:
     branches: [main]
 
@@ -47,23 +42,25 @@ jobs:
 
       - name: 从官方 Docker 镜像提取前端 dist
         run: |
+          IMAGE="ghcr.io/iluobei/miaomiaowux:latest"
           echo "登录 ghcr.io..."
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin 2>/dev/null; true
-          echo "拉取官方镜像..."
-          docker pull ghcr.io/iluobei/miaomiaowuX:latest; pull_ok=$?
-          if [ $pull_ok -ne 0 ]; then
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin 2>/dev/null || true
+          echo "拉取官方镜像: $IMAGE"
+          docker pull $IMAGE
+          if [ $? -ne 0 ]; then
             echo "ghcr.io 拉取失败，尝试备用方式..."
             LATEST=$(curl -sL https://api.github.com/repos/iluobei/miaomiaowuX/releases/latest | grep '"tag_name"' | head -1 | cut -d'"' -f4)
             echo "最新原版版本: $LATEST"
+            # 用原版 Release 的二进制文件提取前端
             curl -sL "https://github.com/iluobei/miaomiaowuX/releases/download/${LATEST}/mmwx-linux-amd64" -o /tmp/mmwx-original
             chmod +x /tmp/mmwx-original
             mkdir -p internal/web/dist
-            echo "WARNING: 无法从 Docker 镜像提取前端 dist"
+            echo "WARNING: 无法从 Docker 镜像提取前端 dist，改用替代方案"
             echo "请手动将前端 dist 文件放入 internal/web/dist/ 后重试"
             exit 1
           fi
           echo "从镜像中提取前端文件..."
-          docker create --name mmwx-tmp ghcr.io/iluobei/miaomiaowuX:latest
+          docker create --name mmwx-tmp $IMAGE
           docker cp mmwx-tmp:/app/internal/web/dist ./internal/web/dist
           docker rm mmwx-tmp
           if [ -d "internal/web/dist" ] && [ "$(ls -A internal/web/dist 2>$null)" ]; then
