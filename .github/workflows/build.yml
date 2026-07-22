@@ -7,6 +7,11 @@ on:
 
 permissions:
   contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: leslie159357/mmwf
 
 jobs:
   build:
@@ -29,10 +34,8 @@ jobs:
       - name: Get missing files from original repo
         run: |
           mkdir -p cmd/server subscribes internal/web/dist/assets internal/web/dist/images
-          # cmd/server
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/cmd/server/main.go" -o cmd/server/main.go
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/cmd/server/cors.go" -o cmd/server/cors.go
-          # subscribes package
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/subscribes/embed.go" -o subscribes/embed.go
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/subscribes/.gitignore" -o subscribes/.gitignore
           curl -sL "https://raw.githubusercontent.com/iluobei/miaomiaowuX/main/subscribes/.keep.yaml" -o subscribes/.keep.yaml
@@ -44,15 +47,12 @@ jobs:
           DIST="internal/web/dist"
           mkdir -p "$DIST/assets" "$DIST/images"
           curl -sL "$SITE/" -o "$DIST/index.html"
-          # JS/CSS from index.html
           for url in $(grep -oP '(?:src|href)="([^"]+\.(js|css))"' "$DIST/index.html" | sed 's/.*"\(.*\)".*/\1/'); do
             echo "DL asset: $url"
             mkdir -p "$DIST/$(dirname $url)"
             curl -sL "$SITE$url" -o "$DIST/$url"
           done
-          # favicon
           curl -sL "$SITE/images/favicon.ico" -o "$DIST/images/favicon.ico"
-          # Create placeholder for images directory if empty
           touch "$DIST/images/.gitkeep"
           echo "Dist files: $(find $DIST -type f | wc -l)"
 
@@ -62,7 +62,7 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build
+      - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
@@ -71,9 +71,42 @@ jobs:
           mkdir -p build
           go build -trimpath -ldflags="-s -w" -o "build/${{ matrix.output }}" ./cmd/server
 
-      - name: Upload
+      - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.output }}
           path: build/${{ matrix.output }}
           retention-days: 30
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Leslie159357/mmwf
+          ref: main
+
+      - name: Download linux binary
+        uses: actions/download-artifact@v4
+        with:
+          name: mmwf-linux-amd64
+          path: build/
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cracked
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
