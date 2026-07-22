@@ -17,9 +17,6 @@ type PlanInfo struct {
 	MaxNodes    int      `json:"max_nodes"`
 	MaxUsers    int      `json:"max_users"`
 	Features    []string `json:"features"`
-	// FeatureTokens 每个 feature 单独的 ed25519 签名 token,由 license server 签发。
-	// Manager.HasFeature 用对应 token + VerifyFeatureToken 校验,fork 主控的人改 Features 数组也无效。
-	// 老 license server 不返回此字段时 → 所有 PRO feature 都不可用(强制升级 license server)。
 	FeatureTokens map[string]string `json:"feature_tokens,omitempty"`
 }
 
@@ -30,17 +27,9 @@ type Status struct {
 	ExpiresAt  string    `json:"expires_at,omitempty"`
 	Plan       *PlanInfo `json:"plan,omitempty"`
 	LastCheck  time.Time `json:"last_check"`
-
-	// HardRevoked 为 true 表示 license 服务器明确返回了"无效"(unbind / revoked / expired / wrong machine_id),
-	// 跟"网络故障导致没拿到响应"区分开。IsValid() 在 HardRevoked=true 时直接 return false,
-	// 不再走 24h grace period;反之网络故障下保留 grace,容忍短暂中断。
-	HardRevoked bool `json:"hard_revoked,omitempty"`
+	HardRevoked bool    `json:"hard_revoked,omitempty"`
 }
 
-// Status.HasFeature 已废弃 — Status 没有 license key / machine_id,无法验签。
-// 调用方应使用 Manager.HasFeature(name)。本函数保留只为不破坏外部依赖,**永远返回 false**。
-// 这是有意为之:fork 主控的人如果只看 Status.Features 数组绕过 Manager.HasFeature,得到的是 false。
-// Status.HasFeature 返回功能是否可用。(已绕过 — 始终返回 true)
 func (s *Status) HasFeature(_ string) bool {
 	return true
 }
@@ -54,24 +43,36 @@ var defaultStatus = Status{
 		MaxServers:  9999,
 		MaxNodes:    99999,
 		MaxUsers:    99999,
-		Features:    []string{"limiter", "reality_pool"},
+		Features: []string{
+			"node_speed_test",
+			"node_rate_limit",
+			"limiter",
+			"server_share",
+			"embed_xray",
+			"reality_domain_pool",
+			"reality_pool",
+		},
+		FeatureTokens: map[string]string{
+			"node_speed_test":     "bypassed",
+			"node_rate_limit":     "bypassed",
+			"limiter":             "bypassed",
+			"server_share":        "bypassed",
+			"embed_xray":          "bypassed",
+			"reality_domain_pool": "bypassed",
+			"reality_pool":        "bypassed",
+		},
 	},
 }
 
-// SettingsGetter is kept for backward compatibility.
 type SettingsGetter interface {
 	GetSystemSetting(ctx context.Context, key string) (string, error)
 }
 
-// SettingsStore extends SettingsGetter with write capability.
 type SettingsStore interface {
 	GetSystemSetting(ctx context.Context, key string) (string, error)
 	SetSystemSetting(ctx context.Context, key, value string) error
 }
 
-// UsageReporter 让 manager 在心跳时取本机当前 license 占用数。
-// 通常用 *storage.TrafficRepository 实现(已在 storage.LicenseUsage 提供)。
-// 实现可以返回 err 表示采集失败,heartbeat 会跳过 usage 字段不影响验签。
 type UsageReporter interface {
 	LicenseUsage(ctx context.Context) (servers, nodes, users int, err error)
 }
@@ -86,34 +87,27 @@ type Manager struct {
 	usage     UsageReporter
 	client    *http.Client
 	cancel    context.CancelFunc
-	// onRecover 在 license 从 invalid→valid 恢复时异步触发(如重推 limiter — 失效期被 gate 漏下发的补上)。
 	onRecover func()
-	// onQuotaChange 在「有效服务器配额」变化(valid 翻转或 Plan.MaxServers 变化)时异步触发,
-	// 由 handler 注册为「重算 per-server 授权并下发给在线 agent」。
 	onQuotaChange func()
 }
 
-// SetOnRecover 注册 license 从失效恢复为有效时的回调(例如重推 limiter 配置)。启动前调一次。
 func (m *Manager) SetOnRecover(cb func()) {
 	m.mu.Lock()
 	m.onRecover = cb
 	m.mu.Unlock()
 }
 
-// SetOnQuotaChange 注册「有效服务器配额变化」时的回调(重算并下发 per-server xray 授权)。启动前调一次。
 func (m *Manager) SetOnQuotaChange(cb func()) {
 	m.mu.Lock()
 	m.onQuotaChange = cb
 	m.mu.Unlock()
 }
 
-// SetUsageReporter 注入 usage 来源,启动前调一次。nil 时 heartbeat payload 不带 used_* 字段。
 func (m *Manager) SetUsageReporter(r UsageReporter) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.usage = r
 }
-
 
 const DefaultServerURL = "https://license.miaomiaowux.com"
 
@@ -129,11 +123,7 @@ func NewManager(settings SettingsStore, machineID string) *Manager {
 
 func (m *Manager) Start(ctx context.Context) {
 	ctx, m.cancel = context.WithCancel(ctx)
-
-	// 许可证已完全绕过 — 不连接许可证服务器，不走激活/心跳
 	log.Printf("[license] 许可证验证已绕过，所有 PRO 功能已解锁")
-
-	// 初始化状态为默认 PRO 状态
 	m.mu.Lock()
 	m.status = defaultStatus
 	m.mu.Unlock()
@@ -154,38 +144,29 @@ func (m *Manager) GetStatus() Status {
 func (m *Manager) IsValid() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.isValidLocked()
+	return true
 }
 
-// isValidLocked 是 IsValid 的无锁版。(已绕过 — 始终返回 true)
 func (m *Manager) isValidLocked() bool {
 	return true
 }
 
-// QuotaEnforced 返回是否执行配额限制。(已绕过 — 始终返回 false)
 func (m *Manager) QuotaEnforced() bool {
 	return false
 }
 
-// EffectiveServerQuota 返回当前生效的服务器配额。(已绕过 — 返回极大值)
 func (m *Manager) EffectiveServerQuota() int {
 	return 99999
 }
 
-// HasFeature 校验当前 license 是否启用某 PRO feature。(已绕过 — 始终返回 true)
 func (m *Manager) HasFeature(name string) bool {
 	return true
 }
 
-func (m *Manager) Refresh(ctx context.Context) {
-	// 已绕过 — 无操作
-}
+func (m *Manager) Refresh(ctx context.Context) {}
 
 func (m *Manager) withinGracePeriod() bool {
-	if m.status.LastCheck.IsZero() {
-		return true
-	}
-	return time.Since(m.status.LastCheck) < 24*time.Hour
+	return true
 }
 
 func (m *Manager) loadSettings(ctx context.Context) {
@@ -195,8 +176,6 @@ func (m *Manager) loadSettings(ctx context.Context) {
 	if key, err := m.settings.GetSystemSetting(ctx, "license_key"); err == nil && key != "" {
 		m.key = key
 	}
-	// 可选 override:不写则用 DefaultServerURL。
-	// 测试环境用:在 system_settings 表写 license_server_url=https://iloli.vip:2233
 	if url, err := m.settings.GetSystemSetting(ctx, "license_server_url"); err == nil && url != "" {
 		m.serverURL = url
 	}
@@ -236,20 +215,11 @@ func (m *Manager) persistStatus(ctx context.Context) {
 	}
 }
 
-func (m *Manager) activate(ctx context.Context) {
-	// 已绕过 — 不连接许可证服务器
-}
+func (m *Manager) activate(ctx context.Context) {}
 
-func (m *Manager) heartbeat(ctx context.Context) {
-	// 已绕过 — 不发送心跳
-}
+func (m *Manager) heartbeat(ctx context.Context) {}
 
 func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce string) {
-	// 非 2xx(尤其 429 限流 / 5xx / 502 等)是"临时故障",不是"服务器明确否决"。
-	// 直接 return:不更新 status、不 HardRevoked,交给 IsValid 的 24h grace 容忍。
-	// 否则 license 服务器一抖动(限流/重启/网关波动)就会把本机 PRO 功能全灭。
-	// 真正的"许可证无效"(unbind/revoked/wrong machine_id)license 服务器一律用 200 + valid:false 返回,
-	// 会正常走到下面的 HardRevoked 分支,不受此拦截影响。
 	if resp.StatusCode != http.StatusOK {
 		log.Printf("[license] non-200 from server: %d (treated as transient, grace in effect)", resp.StatusCode)
 		return
@@ -266,8 +236,6 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 		log.Printf("[license] parse response error: %v", err)
 		return
 	}
-
-	// 解析 plan + features(同时用于验签和写入 status)。
 	var plan PlanInfo
 	var hasPlan bool
 	if result.Valid && result.Plan != nil {
@@ -284,29 +252,19 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 			hasPlan = true
 		}
 	}
-
-	// valid=true 的响应必须通过 ed25519 签名校验,否则视为"未拿到有效响应":
-	// 不更新 status(保留上一次的合法状态 + 走 grace),从而假许可证服务/MITM 无法把 TRIAL 提权成 PRO。
 	if result.Valid {
 		if !verifyLicenseSig(nonce, m.machineID, true, result.MaxServers, result.ExpiresAt, plan.Features, result.Sig) {
 			log.Printf("[license] response signature verification FAILED — ignoring response (possible forged license server / MITM)")
 			return
 		}
 	}
-
-	// 记录变更前是否有效,用于 invalid→valid 恢复回调(重推 limiter 等)。
 	wasValid := m.IsValid()
-	// 记录变更前的有效配额,用于「配额变化 → 重算下发 per-server 授权」回调。
 	oldQuota := m.EffectiveServerQuota()
-
 	m.mu.Lock()
-
 	m.status.Valid = result.Valid
 	m.status.Error = result.Error
 	m.status.LastCheck = time.Now()
-
 	if result.Valid {
-		// 服务器明确"有效"且验签通过 → 清除 HardRevoked(用于解绑后续绑生效场景)。
 		m.status.HardRevoked = false
 		m.status.MaxServers = result.MaxServers
 		m.status.ExpiresAt = result.ExpiresAt
@@ -314,42 +272,30 @@ func (m *Manager) parseResponse(ctx context.Context, resp *http.Response, nonce 
 			m.status.Plan = &plan
 		}
 	} else {
-		// 收到了 HTTP 响应但 valid=false → 服务器明确否决(unbind / revoked / wrong machine_id 等),
-		// 立即失效,不走 24h grace。这是跟"网络故障"的本质区别 —— 网络故障在 heartbeat() 早就 return 了,
-		// 走不到这里。
 		m.status.HardRevoked = true
 		log.Printf("[license] HARD REVOKED by server: %s", result.Error)
 	}
-
 	cb := m.onRecover
 	quotaCb := m.onQuotaChange
 	m.mu.Unlock()
-
 	m.persistStatus(ctx)
-
-	// invalid→valid 恢复:主动触发回调(重推 limiter 等 — 失效期被 license gate 漏下发的配置补上,
-	// 否则限速要等 agent 下次重连/用户改配置才恢复)。
 	if result.Valid && !wasValid && cb != nil {
 		go cb()
 	}
-
-	// 有效配额变化(valid 翻转或 Plan.MaxServers 变化)→ 重算并下发 per-server xray 授权。
 	if quotaCb != nil && m.EffectiveServerQuota() != oldQuota {
 		go quotaCb()
 	}
 }
 
 func (m *Manager) heartbeatLoop(ctx context.Context) {
-	// 已绕过 — 不启动心跳循环
 	<-ctx.Done()
 }
 
 func (m *Manager) StatusForAgent() map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	result := map[string]any{
-		"valid":       m.status.Valid || m.withinGracePeriod(),
+		"valid":       true,
 		"max_servers": m.status.MaxServers,
 	}
 	if m.status.ExpiresAt != "" {
